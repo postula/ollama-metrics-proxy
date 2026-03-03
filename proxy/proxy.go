@@ -405,10 +405,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	p.activeRequests++
 	p.mu.Unlock()
+	metrics.RecordActiveRequests(model, 1)
 	defer func() {
 		p.mu.Lock()
 		p.activeRequests--
 		p.mu.Unlock()
+		metrics.RecordActiveRequests(model, -1)
 	}()
 
 	// Forward to backend
