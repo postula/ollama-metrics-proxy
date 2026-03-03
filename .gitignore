@@ -1,0 +1,22 @@
+# Build artifacts
+/ollama-metrics
+/bin/
+/dist/
+
+# Test artifacts
+coverage.out
+coverage.html
+*.test
+
+# OS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Session/plan files
+session-*.md
+plan.md
