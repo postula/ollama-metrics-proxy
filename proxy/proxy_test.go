@@ -106,6 +106,47 @@ func TestExtractMetrics_OpenAIFormat(t *testing.T) {
 	}
 }
 
+// TestExtractMetrics_AnthropicFormat tests metrics extraction from Anthropic-compatible responses
+func TestExtractMetrics_AnthropicFormat(t *testing.T) {
+	p := &Proxy{}
+
+	body := []byte(`{"id":"msg_123","type":"message","role":"assistant","model":"qwen3.5:35b","content":[{"type":"text","text":"Hi"}],"stop_reason":"end_turn","usage":{"input_tokens":12,"output_tokens":50}}`)
+
+	metrics := p.extractMetrics(body)
+
+	if metrics == nil {
+		t.Fatal("Expected metrics, got nil")
+	}
+	if metrics.Model != "qwen3.5:35b" {
+		t.Errorf("Expected model qwen3.5:35b, got %s", metrics.Model)
+	}
+	if metrics.InputTokens != 12 {
+		t.Errorf("Expected InputTokens=12, got %d", metrics.InputTokens)
+	}
+	if metrics.OutputTokens != 50 {
+		t.Errorf("Expected OutputTokens=50, got %d", metrics.OutputTokens)
+	}
+}
+
+// TestExtractMetrics_SSEStreaming tests metrics extraction from SSE streaming responses
+func TestExtractMetrics_SSEStreaming(t *testing.T) {
+	p := &Proxy{}
+
+	body := []byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"qwen3.5:35b\",\"role\":\"assistant\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":100,\"output_tokens\":42}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+
+	metrics := p.extractMetrics(body)
+
+	if metrics == nil {
+		t.Fatal("Expected metrics, got nil")
+	}
+	if metrics.InputTokens != 100 {
+		t.Errorf("Expected InputTokens=100, got %d", metrics.InputTokens)
+	}
+	if metrics.OutputTokens != 42 {
+		t.Errorf("Expected OutputTokens=42, got %d", metrics.OutputTokens)
+	}
+}
+
 // TestExtractModel tests model extraction from JSON request body
 func TestExtractModel(t *testing.T) {
 	p := &Proxy{}

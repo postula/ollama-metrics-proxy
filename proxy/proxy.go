@@ -28,6 +28,15 @@ var metricExtractionErrors = promauto.NewCounterVec(
 	[]string{"endpoint", "reason"},
 )
 
+// passthroughRequests counts requests that were forwarded without metric extraction.
+var passthroughRequests = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "ollama_proxy_passthrough_requests_total",
+		Help: "Requests forwarded without metric extraction (unrecognized paths)",
+	},
+	[]string{"endpoint"},
+)
+
 // OllamaEvent represents an Ollama API streaming event
 type OllamaEvent struct {
 	Model              string        `json:"model,omitempty"`
@@ -116,7 +125,7 @@ func New(backendURL string, prometheusClient *PrometheusClient) *Proxy {
 
 // categorizeRequest determines the request category from a URL path.
 func (p *Proxy) categorizeRequest(path string) string {
-	if strings.HasPrefix(path, "/api/chat") || strings.HasPrefix(path, "/v1/chat/completions") {
+	if strings.HasPrefix(path, "/api/chat") || strings.HasPrefix(path, "/v1/chat/completions") || strings.HasPrefix(path, "/v1/messages") {
 		return "chat"
 	}
 	if strings.HasPrefix(path, "/api/generate") {
@@ -134,6 +143,7 @@ func (p *Proxy) metricsWorthy(path string) bool {
 		strings.HasPrefix(path, "/api/generate") ||
 		strings.HasPrefix(path, "/api/embeddings") ||
 		strings.HasPrefix(path, "/v1/chat/completions") ||
+		strings.HasPrefix(path, "/v1/messages") ||
 		strings.HasPrefix(path, "/v1/embeddings")
 }
 
@@ -265,29 +275,91 @@ func (p *Proxy) createBackendRequest(r *http.Request) (*http.Request, error) {
 	return req, nil
 }
 
-// openAIResponse represents an OpenAI-compatible response from Ollama's /v1/ endpoints.
-type openAIResponse struct {
+// v1Response represents a response from Ollama's /v1/ endpoints.
+// Supports both OpenAI format (prompt_tokens) and Anthropic format (input_tokens).
+type v1Response struct {
 	Model string `json:"model"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
+		InputTokens      int `json:"input_tokens"`
+		OutputTokens     int `json:"output_tokens"`
 	} `json:"usage"`
 }
 
+func (r *v1Response) inputTokens() int {
+	if r.Usage.InputTokens > 0 {
+		return r.Usage.InputTokens
+	}
+	return r.Usage.PromptTokens
+}
+
+func (r *v1Response) outputTokens() int {
+	if r.Usage.OutputTokens > 0 {
+		return r.Usage.OutputTokens
+	}
+	return r.Usage.CompletionTokens
+}
+
 // extractMetrics extracts metrics from an Ollama response body.
-// Supports both native NDJSON (/api/*) and OpenAI-compatible JSON (/v1/*).
+// Supports: single JSON (/v1/ non-streaming), SSE streaming (/v1/ streaming),
+// and native NDJSON (/api/*).
 func (p *Proxy) extractMetrics(body []byte) *MetricData {
-	// Try OpenAI-compatible format first (single JSON object with "usage" field)
-	var oai openAIResponse
-	if err := json.Unmarshal(body, &oai); err == nil && oai.Usage.PromptTokens > 0 {
+	// Try /v1/ non-streaming format (single JSON object with "usage" field)
+	var v1 v1Response
+	if err := json.Unmarshal(body, &v1); err == nil && (v1.inputTokens() > 0 || v1.outputTokens() > 0) {
 		return &MetricData{
-			Model:        oai.Model,
-			InputTokens:  oai.Usage.PromptTokens,
-			OutputTokens: oai.Usage.CompletionTokens,
+			Model:        v1.Model,
+			InputTokens:  v1.inputTokens(),
+			OutputTokens: v1.outputTokens(),
 		}
 	}
 
+	// Try SSE streaming format (lines prefixed with "data: ")
+	if m := p.extractFromSSE(body); m != nil {
+		return m
+	}
+
 	// Fall back to Ollama native NDJSON format
+	return p.extractFromNDJSON(body)
+}
+
+// extractFromSSE parses Server-Sent Events and extracts usage from the final message_delta event.
+func (p *Proxy) extractFromSSE(body []byte) *MetricData {
+	lines := strings.Split(string(body), "\n")
+	var metrics *MetricData
+	hasSSE := false
+
+	for _, line := range lines {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		hasSSE = true
+		data := strings.TrimPrefix(line, "data: ")
+
+		var v1 v1Response
+		if err := json.Unmarshal([]byte(data), &v1); err == nil {
+			if v1.inputTokens() > 0 || v1.outputTokens() > 0 {
+				metrics = &MetricData{
+					Model:        v1.Model,
+					InputTokens:  v1.inputTokens(),
+					OutputTokens: v1.outputTokens(),
+				}
+			}
+			if v1.Model != "" && metrics != nil && metrics.Model == "" {
+				metrics.Model = v1.Model
+			}
+		}
+	}
+
+	if !hasSSE {
+		return nil
+	}
+	return metrics
+}
+
+// extractFromNDJSON parses Ollama native NDJSON streaming responses.
+func (p *Proxy) extractFromNDJSON(body []byte) *MetricData {
 	metrics := &MetricData{}
 	lines := strings.Split(string(body), "\n")
 
@@ -375,6 +447,8 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Best-effort metric extraction — only for known endpoints with success status
 	if worthy && response.StatusCode >= 200 && response.StatusCode < 300 {
 		p.safeExtractAndRecord(r.URL.Path, model, body, time.Since(startTime))
+	} else if !worthy {
+		passthroughRequests.WithLabelValues(r.URL.Path).Inc()
 	}
 }
 
