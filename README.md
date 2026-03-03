@@ -73,6 +73,14 @@ make coverage     # HTML coverage report
 make pre-commit   # fmt + vet + test
 ```
 
+## Grafana Dashboard
+
+A provisioning-ready dashboard is included at [`grafana/dashboards/ollama-metrics.json`](grafana/dashboards/ollama-metrics.json).
+
+Import it in Grafana via **Dashboards > Import > Upload JSON file**, or use [Grafana provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/#dashboards).
+
+Panels: backend health, request rates by model/category, latency percentiles (p50/p95/p99), token generation rates, proxy self-health.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -116,13 +116,13 @@ func New(backendURL string, prometheusClient *PrometheusClient) *Proxy {
 
 // categorizeRequest determines the request category from a URL path.
 func (p *Proxy) categorizeRequest(path string) string {
-	if strings.HasPrefix(path, "/api/chat") {
+	if strings.HasPrefix(path, "/api/chat") || strings.HasPrefix(path, "/v1/chat/completions") {
 		return "chat"
 	}
 	if strings.HasPrefix(path, "/api/generate") {
 		return "generate"
 	}
-	if strings.HasPrefix(path, "/api/embeddings") {
+	if strings.HasPrefix(path, "/api/embeddings") || strings.HasPrefix(path, "/v1/embeddings") {
 		return "embedding"
 	}
 	return "general"
@@ -132,7 +132,9 @@ func (p *Proxy) categorizeRequest(path string) string {
 func (p *Proxy) metricsWorthy(path string) bool {
 	return strings.HasPrefix(path, "/api/chat") ||
 		strings.HasPrefix(path, "/api/generate") ||
-		strings.HasPrefix(path, "/api/embeddings")
+		strings.HasPrefix(path, "/api/embeddings") ||
+		strings.HasPrefix(path, "/v1/chat/completions") ||
+		strings.HasPrefix(path, "/v1/embeddings")
 }
 
 // extractModel reads the model name from the JSON request body.
@@ -263,9 +265,30 @@ func (p *Proxy) createBackendRequest(r *http.Request) (*http.Request, error) {
 	return req, nil
 }
 
-// extractMetrics extracts metrics from an Ollama NDJSON streaming response body.
+// openAIResponse represents an OpenAI-compatible response from Ollama's /v1/ endpoints.
+type openAIResponse struct {
+	Model string `json:"model"`
+	Usage struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
+}
+
+// extractMetrics extracts metrics from an Ollama response body.
+// Supports both native NDJSON (/api/*) and OpenAI-compatible JSON (/v1/*).
 func (p *Proxy) extractMetrics(body []byte) *MetricData {
-	var events []OllamaEvent
+	// Try OpenAI-compatible format first (single JSON object with "usage" field)
+	var oai openAIResponse
+	if err := json.Unmarshal(body, &oai); err == nil && oai.Usage.PromptTokens > 0 {
+		return &MetricData{
+			Model:        oai.Model,
+			InputTokens:  oai.Usage.PromptTokens,
+			OutputTokens: oai.Usage.CompletionTokens,
+		}
+	}
+
+	// Fall back to Ollama native NDJSON format
+	metrics := &MetricData{}
 	lines := strings.Split(string(body), "\n")
 
 	for _, line := range lines {
@@ -277,12 +300,6 @@ func (p *Proxy) extractMetrics(body []byte) *MetricData {
 			metricExtractionErrors.WithLabelValues("", "parse_error").Inc()
 			continue
 		}
-		events = append(events, event)
-	}
-
-	metrics := &MetricData{}
-
-	for _, event := range events {
 		if event.Model != "" {
 			metrics.Model = event.Model
 		}

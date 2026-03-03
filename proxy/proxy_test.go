@@ -84,6 +84,28 @@ func TestExtractMetrics(t *testing.T) {
 	}
 }
 
+// TestExtractMetrics_OpenAIFormat tests metrics extraction from OpenAI-compatible responses
+func TestExtractMetrics_OpenAIFormat(t *testing.T) {
+	p := &Proxy{}
+
+	body := []byte(`{"id":"chatcmpl-123","object":"chat.completion","model":"qwen3.5:35b","choices":[{"message":{"role":"assistant","content":"Hi"}}],"usage":{"prompt_tokens":16,"completion_tokens":321,"total_tokens":337}}`)
+
+	metrics := p.extractMetrics(body)
+
+	if metrics == nil {
+		t.Fatal("Expected metrics, got nil")
+	}
+	if metrics.Model != "qwen3.5:35b" {
+		t.Errorf("Expected model qwen3.5:35b, got %s", metrics.Model)
+	}
+	if metrics.InputTokens != 16 {
+		t.Errorf("Expected InputTokens=16, got %d", metrics.InputTokens)
+	}
+	if metrics.OutputTokens != 321 {
+		t.Errorf("Expected OutputTokens=321, got %d", metrics.OutputTokens)
+	}
+}
+
 // TestExtractModel tests model extraction from JSON request body
 func TestExtractModel(t *testing.T) {
 	p := &Proxy{}
